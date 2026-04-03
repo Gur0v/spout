@@ -1,6 +1,6 @@
 [package]
 name = "spout"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
 [dependencies]
@@ -8,5 +8,5 @@ anyhow = "1.0"
 hex = "0.4"
 knuffel = "3.2.0"
 serde_json = "1.0"
-getrandom = "0.3"
+getrandom = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "multipart", "json", "rustls-tls"] }

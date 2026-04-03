@@ -92,7 +92,41 @@ fn extract_url(raw: &str, path: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("Value at path '{}' is not a string", path))
 }
 
+fn load_config() -> Result<Config> {
+    let home = std::env::var("HOME").context("$HOME not set")?;
+    let config_path = format!("{}/.config/spout/config.kdl", home);
+    let config_text = std::fs::read_to_string(&config_path)
+        .with_context(|| format!("Missing config file: {}", config_path))?;
+    knuffel::parse(&config_path, &config_text)
+        .map_err(|e| anyhow!("Config parse error: {}", e))
+}
+
 fn main() -> Result<()> {
+    let mut profile_name = None;
+
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "-h" => {
+                println!("Usage: <tool> | spout [PROFILE]\nFlags:\n  -p  Parse config for errors\n  -h  Show help\n  -v  Show version");
+                return Ok(());
+            }
+            "-v" => {
+                println!("spout v{}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
+            "-p" => {
+                load_config()?;
+                println!("Config OK");
+                return Ok(());
+            }
+            name => {
+                if profile_name.is_none() {
+                    profile_name = Some(name.to_string());
+                }
+            }
+        }
+    }
+
     let mut data = Vec::new();
     std::io::stdin()
         .read_to_end(&mut data)
@@ -102,19 +136,14 @@ fn main() -> Result<()> {
         return Err(anyhow!("No data received. Usage: <tool> | spout"));
     }
 
-    let home = std::env::var("HOME").context("$HOME not set")?;
-    let config_path = format!("{}/.config/spout/config.kdl", home);
-    let config_text = std::fs::read_to_string(&config_path)
-        .with_context(|| format!("Missing config file: {}", config_path))?;
-    let config: Config = knuffel::parse(&config_path, &config_text)
-        .map_err(|e| anyhow!("Config parse error: {}", e))?;
-
-    let profile_name = std::env::args().nth(1).unwrap_or(config.default);
+    let config = load_config()?;
+    let target_profile = profile_name.unwrap_or(config.default);
+    
     let profile = config
         .profiles
         .iter()
-        .find(|p| p.name == profile_name)
-        .ok_or_else(|| anyhow!("Profile '{}' not found", profile_name))?;
+        .find(|p| p.name == target_profile)
+        .ok_or_else(|| anyhow!("Profile '{}' not found", target_profile))?;
 
     let filename = generate_filename(&profile.filename);
     let url = profile.url.replace("{filename}", &filename);
