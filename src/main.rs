@@ -62,12 +62,14 @@ fn generate_filename(cfg: &Option<FilenameConfig>) -> String {
 
     if let Some(n) = c.random {
         let mut buf = vec![0u8; n];
-        getrandom::getrandom(&mut buf).expect("getrandom failed");
+        getrandom::fill(&mut buf).expect("getrandom failed");
         name.push_str(&hex::encode(&buf));
     }
 
     if let Some(ext) = &c.extension {
-        name.push('.');
+        if !name.is_empty() && !ext.starts_with('.') {
+            name.push('.');
+        }
         name.push_str(ext);
     }
 
