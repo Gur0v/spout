@@ -1,0 +1,34 @@
+// Default profile to use when no argument is passed to spout
+default "zendesk"
+
+// Clipboard command — receives the result URL on stdin
+// Wayland:
+clipboard "wl-copy"
+// X11:
+// clipboard "xclip" "-selection" "clipboard"
+// clipboard "xsel" "--clipboard" "--input"
+
+profile "zendesk" {
+    url "https://support.zendesk.com/api/v2/uploads.json?filename={filename}"
+    method "POST"
+    format "binary"
+    header "Content-Type" "application/octet-stream"
+
+    // Dot-separated path into the JSON response to find the URL
+    path "upload.attachment.mapped_content_url"
+
+    filename prefix="spout_" random=8 extension="png"
+}
+
+profile "catbox" {
+    url "https://catbox.moe/user/api.php"
+    method "POST"
+    format "multipart"
+    file-field "fileToUpload"
+    field "reqtype" "fileupload"
+
+    // Catbox returns a plain URL string, not JSON — "." means use the raw body
+    path "."
+
+    filename random=8 extension="png"
+}
