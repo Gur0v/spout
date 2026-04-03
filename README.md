@@ -20,6 +20,14 @@ cargo build --release
 cp target/release/spout ~/.local/bin/
 ```
 
+#### Arch Linux (AUR)
+If you're on Arch, you can install `spout` from the AUR using your favorite helper (like `paru` or `yay`):
+
+```sh
+paru -S spout      # stable
+paru -S spout-git  # git HEAD
+```
+
 No OpenSSL, no system dependencies. Pure Rust TLS.
 
 ## Configure
