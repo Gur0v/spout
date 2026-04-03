@@ -30,26 +30,21 @@ paru -S spout-git  # git HEAD
 The default config is in the repo (`config.kdl`) — copy it to `~/.config/spout/config.kdl` and edit to taste. Check the repo for the latest version if something changes.
 
 ```kdl
-// Default profile when none is specified
-default "zendesk"
+default "litterbox"
 
-// Clipboard command — receives the result URL on stdin
-// Wayland:
 clipboard "wl-copy"
-// X11:
 // clipboard "xclip" "-selection" "clipboard"
 // clipboard "xsel" "--clipboard" "--input"
 
-profile "zendesk" {
-    url "https://support.zendesk.com/api/v2/uploads.json?filename={filename}"
+profile "litterbox" {
+    url "https://litterbox.catbox.moe/resources/internals/api.php"
     method "POST"
-    format "binary"
-    header "Content-Type" "application/octet-stream"
-
-    // Dot-separated path into the JSON response to find the URL
-    path "upload.attachment.mapped_content_url"
-
-    filename prefix="spout_" random=8 extension="png"
+    format "multipart"
+    file-field "fileToUpload"
+    field "reqtype" "fileupload"
+    field "time" "24h"
+    path "."
+    filename random=8 extension="png"
 }
 
 profile "catbox" {
@@ -58,10 +53,7 @@ profile "catbox" {
     format "multipart"
     file-field "fileToUpload"
     field "reqtype" "fileupload"
-
-    // Catbox returns a plain URL string, not JSON — "." means use the raw body
     path "."
-
     filename random=8 extension="png"
 }
 ```
@@ -98,7 +90,7 @@ URL goes to stdout. URL also goes to your clipboard. That's the whole program.
 
 ## Status
 
-Early days. Tested on Linux with Flameshot. Forces HTTP/1.1 because some backends (PHP especially) don't handle HTTP/2 well.
+Currently in early development. Verified on Linux with Spectacle, Flameshot, and Grim. HTTP/1.1 is strictly enforced to ensure maximum compatibility with legacy backends.
 
 ## License
 
