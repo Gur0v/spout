@@ -1,32 +1,17 @@
-// Default profile when none is specified
-default "zendesk"
+default "litterbox"
 
-// Clipboard command — receives the result URL on stdin
-// Wayland:
 clipboard "wl-copy"
-// X11:
 // clipboard "xclip" "-selection" "clipboard"
 // clipboard "xsel" "--clipboard" "--input"
 
-profile "zendesk" {
-    url "https://support.zendesk.com/api/v2/uploads.json?filename={filename}"
-    method "POST"
-    format "binary"
-    header "Content-Type" "application/octet-stream"
-
-    // Dot-separated path into the JSON response to find the URL
-    path "upload.attachment.mapped_content_url"
-
-    filename prefix="spout_" random=8 extension="png"
-}
-
-profile "ez" {
-    url "https://api.e-z.host/files"
+profile "litterbox" {
+    url "https://litterbox.catbox.moe/resources/internals/api.php"
     method "POST"
     format "multipart"
-    file-field "file"
-    header "key" "API KEY HERE"
-    path "imageUrl"
+    file-field "fileToUpload"
+    field "reqtype" "fileupload"
+    field "time" "24h"
+    path "."
     filename random=8 extension="png"
 }
 
@@ -36,9 +21,25 @@ profile "catbox" {
     format "multipart"
     file-field "fileToUpload"
     field "reqtype" "fileupload"
-
-    // Catbox returns a plain URL string, not JSON — "." means use the raw body
     path "."
+    filename random=8 extension="png"
+}
 
+profile "zendesk" {
+    url "https://support.zendesk.com/api/v2/uploads.json?filename={filename}"
+    method "POST"
+    format "binary"
+    header "Content-Type" "application/octet-stream"
+    path "upload.attachment.mapped_content_url"
+    filename prefix="spout_" random=8 extension="png"
+}
+
+profile "ez" {
+    url "https://api.e-z.host/files"
+    method "POST"
+    format "multipart"
+    file-field "file"
+    header "key" "YOUR_API_KEY_HERE"
+    path "imageUrl"
     filename random=8 extension="png"
 }
