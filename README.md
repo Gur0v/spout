@@ -76,6 +76,9 @@ The config format is [KDL](https://kdl.dev). It's like JSON but for humans.
 ## Use
 
 ```sh
+# parse the config for errors
+spout -p
+
 # default profile
 flameshot gui -r | spout
 
