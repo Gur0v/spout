@@ -2,10 +2,7 @@
 
 the missing link between your screenshot tool and the internet.
 
-```sh
-flameshot gui -r | spout
-# https://files.catbox.moe/a3f9k2.png  (already in your clipboard)
-```
+![Showcase](assets/showcase.gif)
 
 Most screenshot tools want to own your entire workflow — hotkey, capture, upload, all bundled together. spout doesn't care about any of that. It just reads bytes from stdin and gives you a URL. What produces those bytes is your problem.
 
