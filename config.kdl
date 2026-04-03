@@ -1,4 +1,4 @@
-// Default profile to use when no argument is passed to spout
+// Default profile when none is specified
 default "zendesk"
 
 // Clipboard command — receives the result URL on stdin
