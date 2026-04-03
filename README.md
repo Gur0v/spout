@@ -25,8 +25,6 @@ paru -S spout      # stable
 paru -S spout-git  # git HEAD
 ```
 
-No OpenSSL, no system dependencies. Pure Rust TLS.
-
 ## Configure
 
 The default config is in the repo (`config.kdl`) — copy it to `~/.config/spout/config.kdl` and edit to taste. Check the repo for the latest version if something changes.
