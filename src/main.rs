@@ -53,27 +53,49 @@ struct KV {
     value: String,
 }
 
-fn generate_filename(cfg: &Option<FilenameConfig>) -> String {
-    let Some(c) = cfg else {
-        return "ss.png".to_string();
-    };
-
-    let mut name = c.prefix.clone().unwrap_or_default();
-
-    if let Some(n) = c.random {
-        let mut buf = vec![0u8; n];
-        getrandom::fill(&mut buf).expect("getrandom failed");
-        name.push_str(&hex::encode(&buf));
-    }
-
-    if let Some(ext) = &c.extension {
-        if !name.is_empty() && !ext.starts_with('.') {
-            name.push('.');
+fn generate_filename(
+    cfg: &Option<FilenameConfig>,
+    ext_override: Option<&String>,
+    name_override: Option<&String>,
+) -> String {
+    if let Some(n) = name_override {
+        if let Some(e) = ext_override {
+            let mut s = n.clone();
+            if !e.starts_with('.') {
+                s.push('.');
+            }
+            s.push_str(e);
+            return s;
         }
-        name.push_str(ext);
+        return n.clone();
     }
 
-    if name.is_empty() { "ss.png".to_string() } else { name }
+    let mut name = String::new();
+    let mut ext = ext_override.map(|s| s.as_str());
+
+    if let Some(c) = cfg {
+        name = c.prefix.clone().unwrap_or_default();
+        if let Some(n) = c.random {
+            let mut buf = vec![0u8; n];
+            getrandom::fill(&mut buf).expect("getrandom failed");
+            name.push_str(&hex::encode(&buf));
+        }
+        if ext.is_none() {
+            ext = c.extension.as_deref();
+        }
+    }
+
+    if name.is_empty() {
+        name.push_str("ss");
+    }
+
+    let final_ext = ext.unwrap_or("png");
+    if !final_ext.starts_with('.') {
+        name.push('.');
+    }
+    name.push_str(final_ext);
+
+    name
 }
 
 fn extract_url(raw: &str, path: &str) -> Result<String> {
@@ -85,7 +107,11 @@ fn extract_url(raw: &str, path: &str) -> Result<String> {
         serde_json::from_str(raw).context("Failed to parse server response as JSON")?;
 
     path.split('.')
-        .try_fold(&json, |cur, key| cur.get(key).ok_or(key))
+        .try_fold(&json, |cur, key| {
+            cur.get(key)
+                .or_else(|| key.parse::<usize>().ok().and_then(|idx| cur.get(idx)))
+                .ok_or(key)
+        })
         .map_err(|key| anyhow!("Key '{}' not found in JSON response", key))?
         .as_str()
         .map(str::to_string)
@@ -93,8 +119,12 @@ fn extract_url(raw: &str, path: &str) -> Result<String> {
 }
 
 fn load_config() -> Result<Config> {
-    let home = std::env::var("HOME").context("$HOME not set")?;
-    let config_path = format!("{}/.config/spout/config.kdl", home);
+    let config_dir = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").expect("$HOME not set");
+        format!("{}/.config", home)
+    });
+
+    let config_path = format!("{}/spout/config.kdl", config_dir);
     let config_text = std::fs::read_to_string(&config_path)
         .with_context(|| format!("Missing config file: {}", config_path))?;
     knuffel::parse(&config_path, &config_text)
@@ -102,12 +132,15 @@ fn load_config() -> Result<Config> {
 }
 
 fn main() -> Result<()> {
+    let mut args = std::env::args().skip(1);
     let mut profile_name = None;
+    let mut ext_override = None;
+    let mut name_override = None;
 
-    for arg in std::env::args().skip(1) {
+    while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" => {
-                println!("Usage: <tool> | spout [PROFILE]\nFlags:\n  -p  Parse config for errors\n  -h  Show help\n  -v  Show version");
+                println!("Usage: <tool> | spout [PROFILE] [-n NAME] [-x EXT]\nFlags:\n  -p  Parse config for errors\n  -n  Override filename\n  -x  Override file extension\n  -h  Show help\n  -v  Show version");
                 return Ok(());
             }
             "-v" => {
@@ -118,6 +151,18 @@ fn main() -> Result<()> {
                 load_config()?;
                 println!("Config OK");
                 return Ok(());
+            }
+            "-x" => {
+                ext_override = args.next();
+                if ext_override.is_none() {
+                    return Err(anyhow!("Missing argument for -x"));
+                }
+            }
+            "-n" => {
+                name_override = args.next();
+                if name_override.is_none() {
+                    return Err(anyhow!("Missing argument for -n"));
+                }
             }
             name => {
                 if profile_name.is_none() {
@@ -138,14 +183,14 @@ fn main() -> Result<()> {
 
     let config = load_config()?;
     let target_profile = profile_name.unwrap_or(config.default);
-    
+
     let profile = config
         .profiles
         .iter()
         .find(|p| p.name == target_profile)
         .ok_or_else(|| anyhow!("Profile '{}' not found", target_profile))?;
 
-    let filename = generate_filename(&profile.filename);
+    let filename = generate_filename(&profile.filename, ext_override.as_ref(), name_override.as_ref());
     let url = profile.url.replace("{filename}", &filename);
 
     let client = reqwest::blocking::Client::builder()
@@ -169,10 +214,13 @@ fn main() -> Result<()> {
         for f in &profile.fields {
             form = form.text(f.key.clone(), f.value.clone());
         }
+
+        let mime_type = mime_guess::from_path(&filename).first_or_octet_stream();
+
         let field_name = profile.file_field.clone().unwrap_or_else(|| "file".to_string());
         let part = reqwest::blocking::multipart::Part::bytes(data)
             .file_name(filename)
-            .mime_str("image/png")?;
+            .mime_str(mime_type.as_ref())?;
         req.multipart(form.part(field_name, part)).send()?
     } else {
         req.body(data).send()?
@@ -197,6 +245,7 @@ fn main() -> Result<()> {
             if let Some(mut stdin) = child.stdin.take() {
                 let _ = stdin.write_all(result_url.as_bytes());
             }
+            let _ = child.wait();
         }
     }
 
