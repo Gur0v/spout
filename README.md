@@ -18,7 +18,7 @@ paru -S spout-git  # git HEAD
 ## Configure
 > [!IMPORTANT]
 > Copy `config.kdl` from the repo to `~/.config/spout/config.kdl` and edit it to your liking.
-The config is looked up at `$XDG_CONFIG_HOME/spout/config.kdl`, falling back to `~/.config/spout/config.kdl` if `$XDG_CONFIG_HOME` is unset.
+The config is looked up at `$XDG_CONFIG_HOME/spout/config.kdl`, falling back to `~/.config/spout/config.kdl`.
 
 The config format is [KDL](https://kdl.dev). It's like JSON but for humans.
 Two profiles are included as a starting point. `litterbox` is ephemeral — files expire after 24 hours. `catbox` is permanent. Pick whichever matches your threat level.
@@ -86,7 +86,7 @@ cat image.jpg | spout -x jpg
 cat image.png | spout -n my-screenshot.png
 
 # works with anything that produces bytes
-cat image.png | spout
+cat video.mp4 | spout -x mp4
 ```
 
 URL goes to stdout. URL also goes to your clipboard. That's the whole program.
