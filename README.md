@@ -17,7 +17,7 @@ paru -S spout-git  # git HEAD
 ```
 ## Configure
 > [!IMPORTANT]
-> **You must create a config file before using spout.** Copy `config.kdl` from the repo to `~/.config/spout/config.kdl` and edit it to your liking.
+> Copy `config.kdl` from the repo to `~/.config/spout/config.kdl` and edit it to your liking.
 The config is looked up at `$XDG_CONFIG_HOME/spout/config.kdl`, falling back to `~/.config/spout/config.kdl` if `$XDG_CONFIG_HOME` is unset.
 
 The config format is [KDL](https://kdl.dev). It's like JSON but for humans.
