@@ -83,9 +83,6 @@ If you're pointing spout at your own backend, `header` is where your auth token 
 # generate the default config before first use
 spout -g
 
-# check your config for errors
-spout -p
-
 # pipe anything in, get a URL out
 flameshot gui -r | spout
 
