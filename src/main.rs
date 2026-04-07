@@ -1,7 +1,58 @@
 use anyhow::{anyhow, Context, Result};
+use directories::ProjectDirs;
 use knuffel::Decode;
-use std::io::{Read, Write};
+use lexopt::prelude::*;
+use std::fs;
+use std::io::{self, IsTerminal, Read, Write};
 use std::process::{Command, Stdio};
+use std::time::Duration;
+
+const DEFAULT_CONFIG: &str = r#"default "litterbox"
+
+clipboard "wl-copy"
+// clipboard "xclip" "-selection" "clipboard"
+// clipboard "xsel" "--clipboard" "--input"
+
+profile "litterbox" {
+    url "https://litterbox.catbox.moe/resources/internals/api.php"
+    method "POST"
+    format "multipart"
+    file-field "fileToUpload"
+    field "reqtype" "fileupload"
+    field "time" "24h"
+    path "."
+    filename random=8 extension="png"
+}
+
+profile "catbox" {
+    url "https://catbox.moe/user/api.php"
+    method "POST"
+    format "multipart"
+    file-field "fileToUpload"
+    field "reqtype" "fileupload"
+    path "."
+    filename random=8 extension="png"
+}
+
+profile "zendesk" {
+    url "https://support.zendesk.com/api/v2/uploads.json?filename={filename}"
+    method "POST"
+    format "binary"
+    header "Content-Type" "application/octet-stream"
+    path "upload.attachment.mapped_content_url"
+    filename prefix="spout_" random=8 extension="png"
+}
+
+profile "ez" {
+    url "https://api.e-z.host/files"
+    method "POST"
+    format "multipart"
+    file-field "file"
+    header "key" "YOUR_API_KEY_HERE"
+    path "imageUrl"
+    filename random=8 extension="png"
+}
+"#;
 
 #[derive(Decode, Debug)]
 struct Config {
@@ -53,49 +104,118 @@ struct KV {
     value: String,
 }
 
-fn generate_filename(
-    cfg: &Option<FilenameConfig>,
-    ext_override: Option<&String>,
-    name_override: Option<&String>,
-) -> String {
-    if let Some(n) = name_override {
-        if let Some(e) = ext_override {
-            let mut s = n.clone();
-            if !e.starts_with('.') {
-                s.push('.');
+struct Cli {
+    profile: Option<String>,
+    name: Option<String>,
+    ext: Option<String>,
+    check: bool,
+    gen_config: bool,
+    gen_config_force: bool,
+}
+
+fn parse_cli() -> Result<Cli> {
+    let mut parser = lexopt::Parser::from_env();
+    let mut cli = Cli {
+        profile: None,
+        name: None,
+        ext: None,
+        check: false,
+        gen_config: false,
+        gen_config_force: false,
+    };
+
+    while let Some(arg) = parser.next()? {
+        match arg {
+            Short('h') | Long("help") => {
+                println!("Usage: <tool> | spout [PROFILE] [OPTIONS]\nOptions:\n  -p, --parse            Parse config for errors\n  -n, --name <NAME>      Override filename\n  -x, --ext <EXT>        Override file extension\n  -g, --gen-config       Generate default config\n  -G, --gen-config-force Overwrite config with default\n  -h, --help             Show help\n  -v, --version          Show version");
+                std::process::exit(0);
             }
-            s.push_str(e);
-            return s;
+            Short('v') | Long("version") => {
+                println!("spout v{}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
+            Short('p') | Long("parse") => cli.check = true,
+            Short('g') | Long("gen-config") => cli.gen_config = true,
+            Short('G') | Long("gen-config-force") => cli.gen_config_force = true,
+            Short('x') | Long("ext") => {
+                cli.ext = Some(parser.value()?.into_string().map_err(|s| anyhow!("Invalid UTF-8 in argument: {:?}", s))?)
+            }
+            Short('n') | Long("name") => {
+                cli.name = Some(parser.value()?.into_string().map_err(|s| anyhow!("Invalid UTF-8 in argument: {:?}", s))?)
+            }
+            Value(val) if cli.profile.is_none() => {
+                cli.profile = Some(val.into_string().map_err(|s| anyhow!("Invalid UTF-8 in argument: {:?}", s))?)
+            }
+            _ => return Err(arg.unexpected().into()),
         }
-        return n.clone();
+    }
+    Ok(cli)
+}
+
+fn write_default_config(force: bool) -> Result<()> {
+    let proj_dirs = ProjectDirs::from("", "", "spout").context("Failed to resolve config dir")?;
+    let config_dir = proj_dirs.config_dir();
+    let config_path = config_dir.join("config.kdl");
+
+    if config_path.exists() && !force {
+        return Err(anyhow!(
+            "Config already exists at {}. Use -G to overwrite.",
+            config_path.display()
+        ));
     }
 
-    let mut name = String::new();
-    let mut ext = ext_override.map(|s| s.as_str());
+    fs::create_dir_all(config_dir)?;
+    fs::write(&config_path, DEFAULT_CONFIG)?;
+    println!("Config written to {}", config_path.display());
+    Ok(())
+}
 
-    if let Some(c) = cfg {
-        name = c.prefix.clone().unwrap_or_default();
-        if let Some(n) = c.random {
-            let mut buf = vec![0u8; n];
-            getrandom::fill(&mut buf).expect("getrandom failed");
-            name.push_str(&hex::encode(&buf));
-        }
-        if ext.is_none() {
-            ext = c.extension.as_deref();
-        }
+fn load_config() -> Result<Config> {
+    let proj_dirs = ProjectDirs::from("", "", "spout").context("Failed to resolve config dir")?;
+    let config_path = proj_dirs.config_dir().join("config.kdl");
+
+    if !config_path.exists() {
+        return Err(anyhow!(
+            "Config not found at {}. Run `spout -g` to create one.",
+            config_path.display()
+        ));
     }
 
+    let config_text = fs::read_to_string(&config_path)?;
+    let path_str = config_path.to_str().unwrap_or("config.kdl");
+    knuffel::parse(path_str, &config_text).map_err(|e| anyhow!("Config parse error: {}", e))
+}
+
+fn generate_filename(
+    cfg: Option<&FilenameConfig>,
+    ext_override: Option<&str>,
+    name_override: Option<&str>,
+) -> Result<String> {
+    if let Some(n) = name_override {
+        return Ok(match ext_override {
+            Some(e) => format!("{}.{}", n, e.trim_start_matches('.')),
+            None => n.to_string(),
+        });
+    }
+
+    let mut name = cfg.and_then(|c| c.prefix.clone()).unwrap_or_default();
+    
+    if let Some(n) = cfg.and_then(|c| c.random) {
+        let mut buf = vec![0u8; n];
+        getrandom::getrandom(&mut buf).map_err(|e| anyhow!("RNG failure: {}", e))?;
+        name.push_str(&hex::encode(&buf));
+    }
+    
     if name.is_empty() {
         name.push_str("ss");
     }
 
-    let final_ext = ext.unwrap_or("png");
-    if !final_ext.starts_with('.') {
-        name.push('.');
-    }
-    name.push_str(final_ext);
+    let ext = ext_override
+        .map(String::from)
+        .or_else(|| cfg.and_then(|c| c.extension.clone()))
+        .unwrap_or_else(|| "png".to_string());
 
-    name
+    Ok(format!("{}.{}", name, ext.trim_start_matches('.')))
 }
 
 fn extract_url(raw: &str, path: &str) -> Result<String> {
@@ -103,8 +223,7 @@ fn extract_url(raw: &str, path: &str) -> Result<String> {
         return Ok(raw.trim().to_string());
     }
 
-    let json: serde_json::Value =
-        serde_json::from_str(raw).context("Failed to parse server response as JSON")?;
+    let json: serde_json::Value = serde_json::from_str(raw).context("Invalid JSON response")?;
 
     path.split('.')
         .try_fold(&json, |cur, key| {
@@ -112,91 +231,77 @@ fn extract_url(raw: &str, path: &str) -> Result<String> {
                 .or_else(|| key.parse::<usize>().ok().and_then(|idx| cur.get(idx)))
                 .ok_or(key)
         })
-        .map_err(|key| anyhow!("Key '{}' not found in JSON response", key))?
+        .map_err(|key| anyhow!("Key '{}' not found in JSON", key))?
         .as_str()
         .map(str::to_string)
         .ok_or_else(|| anyhow!("Value at path '{}' is not a string", path))
 }
 
-fn load_config() -> Result<Config> {
-    let config_dir = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| {
-        let home = std::env::var("HOME").expect("$HOME not set");
-        format!("{}/.config", home)
-    });
+fn execute_clipboard(cmd_args: &[String], text: &str) -> Result<()> {
+    if let Some((bin, args)) = cmd_args.split_first() {
+        let mut child = Command::new(bin)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("Failed to spawn clipboard command")?;
 
-    let config_path = format!("{}/spout/config.kdl", config_dir);
-    let config_text = std::fs::read_to_string(&config_path)
-        .with_context(|| format!("Missing config file: {}", config_path))?;
-    knuffel::parse(&config_path, &config_text)
-        .map_err(|e| anyhow!("Config parse error: {}", e))
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+
+        let status = child.wait()?;
+        if !status.success() {
+            eprintln!("spout: clipboard command failed with status {}", status);
+        }
+    }
+    Ok(())
 }
 
 fn main() -> Result<()> {
-    let mut args = std::env::args().skip(1);
-    let mut profile_name = None;
-    let mut ext_override = None;
-    let mut name_override = None;
+    let cli = parse_cli()?;
 
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "-h" => {
-                println!("Usage: <tool> | spout [PROFILE] [-n NAME] [-x EXT]\nFlags:\n  -p  Parse config for errors\n  -n  Override filename\n  -x  Override file extension\n  -h  Show help\n  -v  Show version");
-                return Ok(());
-            }
-            "-v" => {
-                println!("spout v{}", env!("CARGO_PKG_VERSION"));
-                return Ok(());
-            }
-            "-p" => {
-                load_config()?;
-                println!("Config OK");
-                return Ok(());
-            }
-            "-x" => {
-                ext_override = args.next();
-                if ext_override.is_none() {
-                    return Err(anyhow!("Missing argument for -x"));
-                }
-            }
-            "-n" => {
-                name_override = args.next();
-                if name_override.is_none() {
-                    return Err(anyhow!("Missing argument for -n"));
-                }
-            }
-            name => {
-                if profile_name.is_none() {
-                    profile_name = Some(name.to_string());
-                }
-            }
-        }
+    if cli.gen_config_force {
+        return write_default_config(true);
     }
 
-    let mut data = Vec::new();
-    std::io::stdin()
-        .read_to_end(&mut data)
-        .context("Failed to read from stdin")?;
+    if cli.gen_config {
+        return write_default_config(false);
+    }
 
-    if data.is_empty() {
-        return Err(anyhow!("No data received. Usage: <tool> | spout"));
+    if cli.check {
+        load_config()?;
+        println!("Config OK");
+        return Ok(());
+    }
+
+    if io::stdin().is_terminal() {
+        return Err(anyhow!("No data piped to stdin. Usage: <tool> | spout"));
     }
 
     let config = load_config()?;
-    let target_profile = profile_name.unwrap_or(config.default);
+    let target = cli.profile.unwrap_or(config.default);
 
     let profile = config
         .profiles
-        .iter()
-        .find(|p| p.name == target_profile)
-        .ok_or_else(|| anyhow!("Profile '{}' not found", target_profile))?;
+        .into_iter()
+        .find(|p| p.name == target)
+        .ok_or_else(|| anyhow!("Profile '{}' not found", target))?;
 
-    let filename = generate_filename(&profile.filename, ext_override.as_ref(), name_override.as_ref());
+    let filename = generate_filename(
+        profile.filename.as_ref(),
+        cli.ext.as_deref(),
+        cli.name.as_deref(),
+    )?;
+    
     let url = profile.url.replace("{filename}", &filename);
 
     let client = reqwest::blocking::Client::builder()
         .use_rustls_tls()
         .http1_only()
         .user_agent("spout")
+        .timeout(Duration::from_secs(30))
         .build()?;
 
     let mut req = match profile.method.to_uppercase().as_str() {
@@ -205,48 +310,43 @@ fn main() -> Result<()> {
         m => return Err(anyhow!("Unsupported HTTP method: {}", m)),
     };
 
-    for h in &profile.headers {
+    for h in profile.headers {
         req = req.header(&h.key, &h.value);
     }
 
     let response = if profile.format == "multipart" {
+        let mut data = Vec::new();
+        io::stdin().read_to_end(&mut data).context("Failed to read stdin")?;
+        
         let mut form = reqwest::blocking::multipart::Form::new();
-        for f in &profile.fields {
-            form = form.text(f.key.clone(), f.value.clone());
+        for f in profile.fields {
+            form = form.text(f.key, f.value);
         }
 
-        let mime_type = mime_guess::from_path(&filename).first_or_octet_stream();
-
-        let field_name = profile.file_field.clone().unwrap_or_else(|| "file".to_string());
+        let mime = mime_guess::from_path(&filename).first_or_octet_stream();
+        let field_name = profile.file_field.unwrap_or_else(|| "file".to_string());
+        
         let part = reqwest::blocking::multipart::Part::bytes(data)
             .file_name(filename)
-            .mime_str(mime_type.as_ref())?;
+            .mime_str(mime.as_ref())?;
+
         req.multipart(form.part(field_name, part)).send()?
     } else {
-        req.body(data).send()?
+        req.body(reqwest::blocking::Body::new(io::stdin())).send()?
     };
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().unwrap_or_default();
+    let status = response.status();
+    let body = response.text().unwrap_or_default();
+    
+    if !status.is_success() {
         return Err(anyhow!("Upload failed ({}): {}", status, body));
     }
 
-    let result_url = extract_url(&response.text()?, &profile.path)?;
+    let result_url = extract_url(&body, &profile.path)?;
     println!("{result_url}");
 
-    if let Some(args) = &config.clipboard {
-        if let Some((bin, rest)) = args.split_first() {
-            let mut child = Command::new(bin)
-                .args(rest)
-                .stdin(Stdio::piped())
-                .spawn()
-                .context("Failed to spawn clipboard command")?;
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(result_url.as_bytes());
-            }
-            let _ = child.wait();
-        }
+    if let Some(cmd) = config.clipboard {
+        let _ = execute_clipboard(&cmd, &result_url);
     }
 
     Ok(())
