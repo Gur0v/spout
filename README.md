@@ -1,4 +1,5 @@
 # spout
+
 the missing link between your screenshot tool and the internet.
 
 ![Showcase](assets/showcase.gif)
@@ -25,12 +26,12 @@ paru -S spout-git  # git HEAD
 
 ## Configure
 
-> [!NOTE]  
-> Run `spout -g` to generate the default configuration file at `~/.config/spout/config.kdl` (or your OS's standard config directory).
 
-The config format is [KDL](https://kdl.dev). It's like JSON but for humans.
+Run `spout -g` to generate the default configuration file at `~/.config/spout/config.kdl`.
 
-Two standard profiles are included in the generated config. `litterbox` is ephemeral — files expire after 24 hours. `catbox` is permanent. Pick whichever matches your threat level. *(Note: Examples for custom API backends like EZ-Host and Zendesk are also included in the generated config).*
+Two standard profiles are included in the generated config. `litterbox` is ephemeral — files expire after 24 hours. `catbox` is permanent. Pick whichever matches your threat level.
+
+*(Note: Examples for custom API backends like EZ-Host and Zendesk are also included in the generated config).*
 
 ```kdl
 default "litterbox"
@@ -61,6 +62,9 @@ profile "catbox" {
     filename random=8 extension="png"
 }
 ```
+By default, `spout` enforces safety limits to prevent SSRF, DNS rebinding, and accidental massive uploads (100MB cap). It also restricts clipboard interaction to standard binaries (`wl-copy`, `xclip`, `xsel`).
+
+These checks can be relaxed for non-standard environments if needed (`yolo true`).
 
 ### Profile options
 
@@ -74,8 +78,6 @@ profile "catbox" {
 | `header` | Extra headers — auth tokens, content types, etc. Repeatable. |
 | `path` | Dot-separated path to the URL in the JSON response. Use `"."` for plain-text responses. |
 | `filename` | `prefix`, `random` (N random hex bytes), `extension` — all optional |
-
-If you're pointing spout at your own backend, `header` is where your auth token goes and `path` is how you tell it where to find the URL in whatever JSON your server returns.
 
 ## Use
 
@@ -112,9 +114,9 @@ URL goes to stdout. URL also goes to your clipboard. That's the whole program.
 
 ## Status
 
-Verified on Linux (Spectacle, Flameshot, Grim, Scrot) and FreeBSD. HTTP/1.1 is strictly enforced for compatibility with legacy backends.
+Verified on Linux (Spectacle, Flameshot, Grim, Scrot), FreeBSD and OpenBSD. HTTP/1.1 is strictly enforced for compatibility with legacy backends.
 
-Windows is out of scope — use [ShareX](https://getsharex.com/). macOS is untested due to lack of hardware; it may work with a custom clipboard script, but is unsupported.
+Windows is out of scope — use [ShareX](https://getsharex.com/). macOS is unsupported and blocked at the moment.
 
 ## License
 
