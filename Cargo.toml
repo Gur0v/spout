@@ -1,6 +1,6 @@
 [package]
 name = "spout"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 
 [profile.release]
@@ -10,10 +10,13 @@ codegen-units = 1
 strip = true
 panic = "abort"
 
+[build-dependencies]
+vergen-git2 = { version = "9.1", features = ["build", "si"] }
+
 [dependencies]
 anyhow = "1.0"
-directories = "5.0"
-getrandom = "0.2"
+directories = "6.0"
+getrandom = "0.4"
 hex = "0.4"
 knuffel = "3.2"
 lexopt = "0.3"

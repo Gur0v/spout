@@ -19,8 +19,6 @@ const ALLOWED_CLIPBOARD_BINS: &[&str] = &["wl-copy", "xclip", "xsel"];
 const DEFAULT_CONFIG: &str = r#"default "litterbox"
 
 clipboard "wl-copy"
-// clipboard "xclip" "-selection" "clipboard"
-// clipboard "xsel" "--clipboard" "--input"
 
 profile "litterbox" {
     url "https://litterbox.catbox.moe/resources/internals/api.php"
@@ -136,18 +134,49 @@ impl Cli {
                     println!(
                         "Usage: <tool> | spout [PROFILE] [OPTIONS]\n\
                          Options:\n\
-                         \x20 -p, --parse             Parse config for errors\n\
-                         \x20 -n, --name <NAME>        Override filename\n\
-                         \x20 -x, --ext <EXT>          Override file extension\n\
-                         \x20 -g, --gen-config         Generate default config\n\
-                         \x20 -G, --gen-config-force   Overwrite config with default\n\
-                         \x20 -h, --help               Show help\n\
-                         \x20 -v, --version            Show version"
+                         \x20 -p, --parse            Parse config for errors\n\
+                         \x20 -n, --name <NAME>      Override filename\n\
+                         \x20 -x, --ext <EXT>        Override file extension\n\
+                         \x20 -g, --gen-config       Generate default config\n\
+                         \x20 -G, --gen-config-force Overwrite config with default\n\
+                         \x20 -h, --help             Show help\n\
+                         \x20 -v, --version          Show version"
                     );
                     std::process::exit(0);
                 }
                 Short('v') | Long("version") => {
-                    println!("spout v{}", env!("CARGO_PKG_VERSION"));
+                    let commit = Command::new("git")
+                    .args(["rev-parse", "--short", "HEAD"])
+                    .output()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .unwrap_or_else(|_| "unknown".to_string());
+
+                    let branch = Command::new("git")
+                    .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                    .output()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .unwrap_or_else(|_| "detached".to_string());
+
+                    let date = Command::new("git")
+                    .args(["log", "-1", "--format=%cs"])
+                    .output()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .unwrap_or_else(|_| "unknown-date".to_string());
+
+                    let dirty = Command::new("git")
+                    .args(["status", "--porcelain"])
+                    .output()
+                    .map(|o| if o.stdout.is_empty() { "" } else { "-dirty" })
+                    .unwrap_or("");
+
+                    println!(
+                        "spout v{} ({} on {}, {}){}",
+                             env!("CARGO_PKG_VERSION"),
+                             commit,
+                             branch,
+                             date,
+                             dirty
+                    );
                     std::process::exit(0);
                 }
                 Short('p') | Long("parse") => cli.check = true,
@@ -261,7 +290,7 @@ fn generate_filename(
     if let Some(n) = cfg.and_then(|c| c.random) {
         let byte_len = (n + 1) / 2;
         let mut buf = vec![0u8; byte_len];
-        getrandom::getrandom(&mut buf).map_err(|e| anyhow!("RNG error: {}", e))?;
+        getrandom::fill(&mut buf).map_err(|e| anyhow!("RNG error: {}", e))?;
         base.push_str(&hex::encode(&buf)[..n]);
     }
 
