@@ -147,37 +147,12 @@ impl Cli {
                     std::process::exit(0);
                 }
                 Short('v') | Long("version") => {
-                    let commit = Command::new("git")
-                    .args(["rev-parse", "--short", "HEAD"])
-                    .output()
-                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                    .unwrap_or_else(|_| "unknown".to_string());
-
-                    let branch = Command::new("git")
-                    .args(["rev-parse", "--abbrev-ref", "HEAD"])
-                    .output()
-                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                    .unwrap_or_else(|_| "detached".to_string());
-
-                    let date = Command::new("git")
-                    .args(["log", "-1", "--format=%cs"])
-                    .output()
-                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                    .unwrap_or_else(|_| "unknown-date".to_string());
-
-                    let dirty = Command::new("git")
-                    .args(["status", "--porcelain"])
-                    .output()
-                    .map(|o| if o.stdout.is_empty() { "" } else { "-dirty" })
-                    .unwrap_or("");
-
                     println!(
-                        "spout v{} ({} on {}, {}){}",
+                        "spout v{} ({} on {}, {})",
                              env!("CARGO_PKG_VERSION"),
-                             commit,
-                             branch,
-                             date,
-                             dirty
+                             env!("VERGEN_GIT_SHA"),
+                             env!("VERGEN_GIT_BRANCH"),
+                             env!("VERGEN_GIT_COMMIT_DATE")
                     );
                     std::process::exit(0);
                 }

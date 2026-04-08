@@ -1,7 +1,8 @@
 [package]
 name = "spout"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
+license = "GPL-3.0-or-later"
 
 [profile.release]
 opt-level = "z"
@@ -12,6 +13,7 @@ panic = "abort"
 
 [build-dependencies]
 vergen-git2 = { version = "9.1", features = ["build", "si"] }
+anyhow = "1.0"
 
 [dependencies]
 anyhow = "1.0"
