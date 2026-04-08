@@ -19,6 +19,8 @@ const ALLOWED_CLIPBOARD_BINS: &[&str] = &["wl-copy", "xclip", "xsel"];
 const DEFAULT_CONFIG: &str = r#"default "litterbox"
 
 clipboard "wl-copy"
+// clipboard "xclip" "-selection" "clipboard"
+// clipboard "xsel" "--clipboard" "--input"
 
 profile "litterbox" {
     url "https://litterbox.catbox.moe/resources/internals/api.php"
