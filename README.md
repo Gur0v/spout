@@ -116,7 +116,7 @@ URL goes to stdout. URL also goes to your clipboard. That's the whole program.
 
 Verified on Linux (Spectacle, Flameshot, Grim, Scrot), FreeBSD and OpenBSD. HTTP/1.1 is strictly enforced for compatibility with legacy backends.
 
-Windows is out of scope — use [ShareX](https://getsharex.com/). macOS is unsupported and blocked at the moment.
+Windows is out of scope — use [ShareX](https://getsharex.com/). macOS might get support soon but is blocked at the moment.
 
 ## License
 
