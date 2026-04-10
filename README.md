@@ -13,8 +13,13 @@ It's a pipe segment. That's it.
 ```sh
 git clone https://github.com/Gur0v/spout
 cd spout
-cargo build --release
-cp target/release/spout ~/.local/bin/
+sh ./install
+```
+
+To uninstall globally, just run:
+
+```sh
+sh ./uninstall
 ```
 
 #### Arch Linux (AUR)

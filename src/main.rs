@@ -1,4 +1,3 @@
-use anyhow::{anyhow, Context, Result};
 use directories::ProjectDirs;
 use knuffel::Decode;
 use lexopt::prelude::*;
@@ -8,11 +7,122 @@ use std::io::{self, IsTerminal, Read, Write as IoWrite};
 use std::net::{IpAddr, ToSocketAddrs};
 use std::process::{Command, Stdio};
 use std::time::Duration;
+use thiserror::Error;
+
+#[cfg(not(debug_assertions))]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+#[derive(Error, Debug)]
+pub enum SpoutError {
+    #[error("invalid utf-8 in {0}: {1:?}")]
+    InvalidUtf8(&'static str, std::ffi::OsString),
+
+    #[error("failed to resolve config dir")]
+    NoConfigDir,
+
+    #[error("config exists at {0} -- use -G to overwrite")]
+    ConfigExists(std::path::PathBuf),
+
+    #[error("config not found at {0} -- run: spout -g")]
+    ConfigNotFound(std::path::PathBuf),
+
+    #[error("insecure config permissions -- run: chmod 600 {0}")]
+    InsecureConfig(std::path::PathBuf),
+
+    #[error("parse error: {0}")]
+    ParseError(String),
+
+    #[error("rng error: {0}")]
+    RngError(#[source] getrandom::Error),
+
+    #[error("dangerous characters in filename: {0}")]
+    DangerousFilename(String),
+
+    #[error("invalid url: {0}")]
+    InvalidUrl(#[from] url::ParseError),
+
+    #[error("unsupported scheme: {0}")]
+    UnsupportedScheme(String),
+
+    #[error("no host in url")]
+    NoHost,
+
+    #[error("no port in url")]
+    NoPort,
+
+    #[error("dns resolution failed: {0}")]
+    DnsResolution(#[source] io::Error),
+
+    #[error("no addresses resolved for host")]
+    NoAddresses,
+
+    #[error("url resolves to a private ip address")]
+    PrivateIp,
+
+    #[error("response is not valid json: {0}")]
+    InvalidJson(#[from] serde_json::Error),
+
+    #[error("key '{0}' not found in response")]
+    KeyNotFound(String),
+
+    #[error("response path '{0}' is not a string")]
+    NotAString(String),
+
+    #[error("response value is not a valid url: {0}")]
+    ResponseInvalidUrl(#[source] url::ParseError),
+
+    #[error("unexpected scheme in response url: {0}")]
+    ResponseUnexpectedScheme(String),
+
+    #[error("clipboard binary must be a name, not a path")]
+    ClipboardPathNotAllowed,
+
+    #[error("clipboard binary '{0}' is not allowed")]
+    ClipboardBinaryNotAllowed(String),
+
+    #[error("failed to spawn clipboard binary '{0}': {1}")]
+    ClipboardSpawn(String, #[source] io::Error),
+
+    #[error("stdin read timed out after {0}s")]
+    StdinTimeout(u64),
+
+    #[error("failed to read from stdin: {0}")]
+    StdinRead(#[source] io::Error),
+
+    #[error("input exceeds {0} MB limit")]
+    InputTooLarge(u64),
+
+    #[error("unsupported http method: {0}")]
+    UnsupportedMethod(String),
+
+    #[error("no input data -- usage: <cmd> | spout [profile]")]
+    NoInputData,
+
+    #[error("no profile named '{0}'")]
+    ProfileNotFound(String),
+
+    #[error("failed to read response: {0}")]
+    ResponseReadError(#[source] io::Error),
+
+    #[error("upload failed ({0}) -- {1}")]
+    UploadFailed(reqwest::StatusCode, String),
+
+    #[error(transparent)]
+    Io(#[from] io::Error),
+
+    #[error(transparent)]
+    Reqwest(#[from] reqwest::Error),
+
+    #[error(transparent)]
+    Lexopt(#[from] lexopt::Error),
+}
+
+pub type Result<T, E = SpoutError> = std::result::Result<T, E>;
 
 const MAX_UPLOAD: u64 = 100 * 1024 * 1024;
 const MAX_RESPONSE: u64 = 10 * 1024 * 1024;
-const TIMEOUT_STDIN: u64 = 120;
-const TIMEOUT_YOLO: u64 = 3600;
+
 const TIMEOUT_HTTP: u64 = 30;
 
 const ALLOWED_CLIPBOARD_BINS: &[&str] = &["wl-copy", "xclip", "xsel"];
@@ -162,23 +272,23 @@ impl Cli {
                 Short('g') | Long("gen-config") => cli.gen_config = true,
                 Short('G') | Long("gen-config-force") => cli.gen_config_force = true,
                 Short('x') | Long("ext") => {
+                    let v = p.value()?;
                     cli.ext = Some(
-                        p.value()?
-                            .into_string()
-                            .map_err(|s| anyhow!("invalid utf-8 in --ext: {:?}", s))?,
+                        v.into_string()
+                            .map_err(|s| SpoutError::InvalidUtf8("--ext", s))?
                     );
                 }
                 Short('n') | Long("name") => {
+                    let v = p.value()?;
                     cli.name = Some(
-                        p.value()?
-                            .into_string()
-                            .map_err(|s| anyhow!("invalid utf-8 in --name: {:?}", s))?,
+                        v.into_string()
+                            .map_err(|s| SpoutError::InvalidUtf8("--name", s))?
                     );
                 }
                 Value(v) if cli.profile.is_none() => {
                     cli.profile = Some(
                         v.into_string()
-                            .map_err(|s| anyhow!("invalid utf-8 in profile name: {:?}", s))?,
+                            .map_err(|s| SpoutError::InvalidUtf8("profile name", s))?
                     );
                 }
                 _ => return Err(arg.unexpected().into()),
@@ -190,7 +300,7 @@ impl Cli {
 }
 
 fn config_path() -> Result<std::path::PathBuf> {
-    let dirs = ProjectDirs::from("", "", "spout").context("failed to resolve config dir")?;
+    let dirs = ProjectDirs::from("", "", "spout").ok_or(SpoutError::NoConfigDir)?;
     Ok(dirs.config_dir().join("config.kdl"))
 }
 
@@ -198,10 +308,7 @@ fn write_config(force: bool) -> Result<()> {
     let path = config_path()?;
 
     if path.exists() && !force {
-        return Err(anyhow!(
-            "config exists at {} -- use -G to overwrite",
-            path.display()
-        ));
+        return Err(SpoutError::ConfigExists(path));
     }
 
     if let Some(dir) = path.parent() {
@@ -226,10 +333,7 @@ fn load_config() -> Result<Config> {
     let path = config_path()?;
 
     if !path.exists() {
-        return Err(anyhow!(
-            "config not found at {} -- run: spout -g",
-            path.display()
-        ));
+        return Err(SpoutError::ConfigNotFound(path));
     }
 
     #[cfg(unix)]
@@ -237,17 +341,14 @@ fn load_config() -> Result<Config> {
         use std::os::unix::fs::PermissionsExt;
         if let Ok(meta) = fs::metadata(&path) {
             if meta.permissions().mode() & 0o077 != 0 {
-                return Err(anyhow!(
-                    "insecure config permissions -- run: chmod 600 {}",
-                    path.display()
-                ));
+                return Err(SpoutError::InsecureConfig(path));
             }
         }
     }
 
     let text = fs::read_to_string(&path)?;
     let path_str = path.to_str().unwrap_or("config.kdl");
-    knuffel::parse(path_str, &text).map_err(|e| anyhow!("parse error: {}", e))
+    knuffel::parse(path_str, &text).map_err(|e| SpoutError::ParseError(e.to_string()))
 }
 
 fn generate_filename(
@@ -269,7 +370,7 @@ fn generate_filename(
     if let Some(n) = cfg.and_then(|c| c.random) {
         let byte_len = (n + 1) / 2;
         let mut buf = vec![0u8; byte_len];
-        getrandom::fill(&mut buf).map_err(|e| anyhow!("rng error: {}", e))?;
+        getrandom::fill(&mut buf).map_err(SpoutError::RngError)?;
         base.push_str(&hex::encode(&buf)[..n]);
     }
 
@@ -290,7 +391,7 @@ fn validate_filename(name: &str) -> Result<()> {
         || name.contains("..")
         || name.to_ascii_lowercase().contains("%2f")
     {
-        return Err(anyhow!("dangerous characters in filename: {}", name));
+        return Err(SpoutError::DangerousFilename(name.to_string()));
     }
     Ok(())
 }
@@ -329,42 +430,55 @@ fn is_private_ip(ip: IpAddr) -> bool {
     }
 }
 
-fn resolve_url(url: &str) -> Result<(reqwest::Url, std::net::SocketAddr)> {
-    let parsed = reqwest::Url::parse(url).context("invalid url")?;
+fn resolve_url(url: &str) -> Result<(reqwest::Url, Option<std::net::SocketAddr>)> {
+    let parsed = reqwest::Url::parse(url)?;
 
     match parsed.scheme() {
         "http" | "https" => {}
-        s => return Err(anyhow!("unsupported scheme: {}", s)),
+        s => return Err(SpoutError::UnsupportedScheme(s.to_string())),
     }
 
-    let host = parsed.host_str().ok_or_else(|| anyhow!("no host in url"))?;
-    let port = parsed
-        .port_or_known_default()
-        .ok_or_else(|| anyhow!("no port in url"))?;
+    let host = parsed.host_str().ok_or(SpoutError::NoHost)?;
+    let port = parsed.port_or_known_default().ok_or(SpoutError::NoPort)?;
 
-    let addrs: Vec<_> = (host, port)
-        .to_socket_addrs()
-        .context("dns resolution failed")?
-        .collect();
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        let addr = std::net::SocketAddr::new(ip, port);
+        if is_private_ip(ip) {
+            return Err(SpoutError::PrivateIp);
+        }
+        return Ok((parsed, Some(addr)));
+    }
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let host_string = host.to_string();
+    
+    std::thread::spawn(move || {
+        let _ = tx.send((host_string.as_str(), port).to_socket_addrs());
+    });
+
+    let addrs_res = rx.recv_timeout(Duration::from_millis(1500))
+        .map_err(|_| SpoutError::DnsResolution(io::Error::new(io::ErrorKind::TimedOut, "DNS resolution timed out")))?;
+
+    let addrs: Vec<_> = addrs_res.map_err(SpoutError::DnsResolution)?.collect();
 
     if addrs.is_empty() {
-        return Err(anyhow!("no addresses resolved for host"));
+        return Err(SpoutError::NoAddresses);
     }
 
     for addr in &addrs {
         if is_private_ip(addr.ip()) {
-            return Err(anyhow!("url resolves to a private ip address"));
+            return Err(SpoutError::PrivateIp);
         }
     }
 
-    Ok((parsed, addrs[0]))
+    Ok((parsed, Some(addrs[0])))
 }
 
 fn parse_url_yolo(url: &str) -> Result<reqwest::Url> {
-    let parsed = reqwest::Url::parse(url).context("invalid url")?;
+    let parsed = reqwest::Url::parse(url)?;
     match parsed.scheme() {
         "http" | "https" => Ok(parsed),
-        s => Err(anyhow!("unsupported scheme: {}", s)),
+        s => Err(SpoutError::UnsupportedScheme(s.to_string())),
     }
 }
 
@@ -374,7 +488,7 @@ fn extract_response_value(body: &str, path: &str) -> Result<String> {
     }
 
     let json: serde_json::Value =
-        serde_json::from_str(body).context("response is not valid json")?;
+        serde_json::from_str(body)?;
 
     let value = path
         .split('.')
@@ -383,19 +497,19 @@ fn extract_response_value(body: &str, path: &str) -> Result<String> {
                 .or_else(|| key.parse::<usize>().ok().and_then(|i| cur.get(i)))
                 .ok_or(key)
         })
-        .map_err(|k| anyhow!("key '{}' not found in response", k))?;
+        .map_err(|k| SpoutError::KeyNotFound(k.to_string()))?;
 
     value
         .as_str()
         .map(str::to_string)
-        .ok_or_else(|| anyhow!("response path '{}' is not a string", path))
+        .ok_or_else(|| SpoutError::NotAString(path.to_string()))
 }
 
 fn validate_response_url(url: &str) -> Result<()> {
-    let parsed = reqwest::Url::parse(url).context("response value is not a valid url")?;
+    let parsed = reqwest::Url::parse(url).map_err(SpoutError::ResponseInvalidUrl)?;
     match parsed.scheme() {
         "http" | "https" => Ok(()),
-        s => Err(anyhow!("unexpected scheme in response url: {}", s)),
+        s => Err(SpoutError::ResponseUnexpectedScheme(s.to_string())),
     }
 }
 
@@ -407,10 +521,10 @@ fn run_clipboard(cmd: &[String], text: &str, yolo: bool) -> Result<()> {
 
     if !yolo {
         if bin.contains('/') || bin.contains('\\') {
-            return Err(anyhow!("clipboard binary must be a name, not a path"));
+            return Err(SpoutError::ClipboardPathNotAllowed);
         }
         if !ALLOWED_CLIPBOARD_BINS.contains(&bin.as_str()) {
-            return Err(anyhow!("clipboard binary '{}' is not allowed", bin));
+            return Err(SpoutError::ClipboardBinaryNotAllowed(bin.to_string()));
         }
     }
 
@@ -418,7 +532,7 @@ fn run_clipboard(cmd: &[String], text: &str, yolo: bool) -> Result<()> {
         .args(args)
         .stdin(Stdio::piped())
         .spawn()
-        .with_context(|| format!("failed to spawn clipboard binary '{}'", bin))?;
+        .map_err(|e| SpoutError::ClipboardSpawn(bin.to_string(), e))?;
 
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(text.as_bytes()).ok();
@@ -432,45 +546,30 @@ fn run_clipboard(cmd: &[String], text: &str, yolo: bool) -> Result<()> {
     Ok(())
 }
 
-fn read_stdin(max_bytes: Option<u64>, timeout_secs: u64) -> Result<Vec<u8>> {
-    let (tx, rx) = std::sync::mpsc::channel();
-
-    std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let result = if let Some(max) = max_bytes {
-            io::stdin().take(max + 1).read_to_end(&mut buf)
-        } else {
-            io::stdin().read_to_end(&mut buf)
-        };
-        let _ = tx.send((buf, result));
-    });
-
-    let (data, result) = rx
-        .recv_timeout(Duration::from_secs(timeout_secs))
-        .map_err(|_| anyhow!("stdin read timed out after {}s", timeout_secs))?;
-
-    result.context("failed to read from stdin")?;
-
-    if let Some(max) = max_bytes {
-        if data.len() as u64 > max {
-            return Err(anyhow!("input exceeds {} MB limit", max / 1024 / 1024));
-        }
-    }
-
-    Ok(data)
+struct CountingReader<R> {
+    inner: R,
+    bytes_read: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
-fn build_request(
+impl<R: Read> Read for CountingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.bytes_read.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+        Ok(n)
+    }
+}
+
+fn build_request<R: Read + Send + 'static>(
     client: &reqwest::blocking::Client,
     profile: &Profile,
     url: reqwest::Url,
-    data: Vec<u8>,
+    data: R,
     filename: &str,
 ) -> Result<reqwest::blocking::Response> {
     let mut req = match profile.method.to_ascii_uppercase().as_str() {
         "POST" => client.post(url),
         "PUT" => client.put(url),
-        m => return Err(anyhow!("unsupported http method: {}", m)),
+        m => return Err(SpoutError::UnsupportedMethod(m.to_string())),
     };
 
     for h in &profile.headers {
@@ -484,7 +583,7 @@ fn build_request(
             .clone()
             .unwrap_or_else(|| "file".to_string());
 
-        let part = reqwest::blocking::multipart::Part::bytes(data)
+        let part = reqwest::blocking::multipart::Part::reader(data)
             .file_name(filename.to_string())
             .mime_str(mime.as_ref())?;
 
@@ -495,7 +594,7 @@ fn build_request(
 
         req.multipart(form.part(field_name, part)).send()?
     } else {
-        req.body(data).send()?
+        req.body(reqwest::blocking::Body::new(data)).send()?
     };
 
     Ok(response)
@@ -527,7 +626,7 @@ fn run() -> Result<()> {
     }
 
     if io::stdin().is_terminal() {
-        return Err(anyhow!("no input data -- usage: <cmd> | spout [profile]"));
+        return Err(SpoutError::NoInputData);
     }
 
     let config = load_config()?;
@@ -537,7 +636,7 @@ fn run() -> Result<()> {
         .profiles
         .into_iter()
         .find(|p| p.name == target)
-        .ok_or_else(|| anyhow!("no profile named '{}'", target))?;
+        .ok_or_else(|| SpoutError::ProfileNotFound(target.clone()))?;
 
     let filename = generate_filename(
         profile.filename.as_ref(),
@@ -550,14 +649,6 @@ fn run() -> Result<()> {
     }
 
     let raw_url = profile.url.replace("{filename}", &uri_encode(&filename));
-
-    let data = if config.yolo {
-        read_stdin(None, TIMEOUT_YOLO)?
-    } else {
-        read_stdin(Some(MAX_UPLOAD), TIMEOUT_STDIN)?
-    };
-
-    let size = data.len();
 
     let mut builder = reqwest::blocking::Client::builder()
         .use_rustls_tls()
@@ -572,33 +663,52 @@ fn run() -> Result<()> {
         parse_url_yolo(&raw_url)?
     } else {
         let (parsed, addr) = resolve_url(&raw_url)?;
-        builder = builder
-            .redirect(reqwest::redirect::Policy::none())
-            .resolve(parsed.host_str().unwrap_or(""), addr);
+        if let Some(addr) = addr {
+            builder = builder
+                .resolve(parsed.host_str().unwrap_or(""), addr);
+        }
+        builder = builder.redirect(reqwest::redirect::Policy::none());
         parsed
     };
 
     let client = builder.build()?;
+    
+    let bytes_read = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let stdin = io::stdin();
+    
     let t0 = std::time::Instant::now();
-    let mut response = build_request(&client, &profile, url, data, &filename)?;
+    let response = if config.yolo {
+        let cr = CountingReader {
+            inner: stdin,
+            bytes_read: std::sync::Arc::clone(&bytes_read),
+        };
+        build_request(&client, &profile, url, cr, &filename)?
+    } else {
+        let cr = CountingReader {
+            inner: stdin.take(MAX_UPLOAD),
+            bytes_read: std::sync::Arc::clone(&bytes_read),
+        };
+        build_request(&client, &profile, url, cr, &filename)?
+    };
+
     let elapsed = t0.elapsed().as_secs_f64();
+    let size = bytes_read.load(std::sync::atomic::Ordering::Relaxed);
 
     let status = response.status();
     let mut raw_body = Vec::new();
 
     if config.yolo {
-        response.read_to_end(&mut raw_body).context("failed to read response")?;
+        let mut r = response;
+        r.read_to_end(&mut raw_body).map_err(SpoutError::ResponseReadError)?;
     } else {
-        response
-            .take(MAX_RESPONSE)
-            .read_to_end(&mut raw_body)
-            .context("failed to read response")?;
+        let mut r = response.take(MAX_RESPONSE);
+        r.read_to_end(&mut raw_body).map_err(SpoutError::ResponseReadError)?;
     }
 
     let body = String::from_utf8_lossy(&raw_body);
 
     if !status.is_success() {
-        return Err(anyhow!("upload failed ({}) -- {}", status, body.trim()));
+        return Err(SpoutError::UploadFailed(status, body.trim().to_string()));
     }
 
     let result = extract_response_value(&body, &profile.path)?;
@@ -617,14 +727,19 @@ fn run() -> Result<()> {
     );
 
     if let Some(cmd) = config.clipboard {
-        if let Err(e) = run_clipboard(&cmd, &result, config.yolo) {
-            eprintln!("spout: warn: clipboard error: {}", e);
+        if !cmd.is_empty() {
+            if let Err(e) = run_clipboard(&cmd, &result, config.yolo) {
+                eprintln!("spout: warn: clipboard error: {}", e);
+            }
         }
     }
 
     Ok(())
 }
 
-fn main() -> Result<()> {
-    run()
+fn main() {
+    if let Err(e) = run() {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    }
 }
