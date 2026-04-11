@@ -4,8 +4,10 @@ use lexopt::prelude::*;
 use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::io::{self, IsTerminal, Read, Write as IoWrite};
-use std::net::{IpAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::process::{Command, Stdio};
+use std::sync::{mpsc, Arc};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use thiserror::Error;
 
@@ -54,6 +56,9 @@ pub enum SpoutError {
     #[error("dns resolution failed: {0}")]
     DnsResolution(#[source] io::Error),
 
+    #[error("dns resolution timed out")]
+    DnsTimeout,
+
     #[error("no addresses resolved for host")]
     NoAddresses,
 
@@ -69,11 +74,17 @@ pub enum SpoutError {
     #[error("response path '{0}' is not a string")]
     NotAString(String),
 
+    #[error("response body is too large to be a valid url")]
+    ResponseTooLarge,
+
     #[error("response value is not a valid url: {0}")]
     ResponseInvalidUrl(#[source] url::ParseError),
 
     #[error("unexpected scheme in response url: {0}")]
     ResponseUnexpectedScheme(String),
+
+    #[error("fields are not supported for binary format uploads")]
+    FieldsInBinaryFormat,
 
     #[error("clipboard binary must be a name, not a path")]
     ClipboardPathNotAllowed,
@@ -83,9 +94,6 @@ pub enum SpoutError {
 
     #[error("failed to spawn clipboard binary '{0}': {1}")]
     ClipboardSpawn(String, #[source] io::Error),
-
-    #[error("stdin read timed out after {0}s")]
-    StdinTimeout(u64),
 
     #[error("failed to read from stdin: {0}")]
     StdinRead(#[source] io::Error),
@@ -122,8 +130,9 @@ pub type Result<T, E = SpoutError> = std::result::Result<T, E>;
 
 const MAX_UPLOAD: u64 = 100 * 1024 * 1024;
 const MAX_RESPONSE: u64 = 10 * 1024 * 1024;
-
-const TIMEOUT_HTTP: u64 = 30;
+const MAX_URL_LEN: usize = 2048;
+const HTTP_TIMEOUT_SECS: u64 = 30;
+const DNS_TIMEOUT_MS: u64 = 1500;
 
 const ALLOWED_CLIPBOARD_BINS: &[&str] = &["wl-copy", "xclip", "xsel"];
 
@@ -200,8 +209,8 @@ struct Profile {
     path: String,
     #[knuffel(child)]
     filename: Option<FilenameConfig>,
-    #[knuffel(child, unwrap(argument))]
-    file_field: Option<String>,
+    #[knuffel(child, unwrap(argument), default = "file".to_string())]
+    file_field: String,
     #[knuffel(children(name = "header"))]
     headers: Vec<KeyValue>,
     #[knuffel(children(name = "field"))]
@@ -238,10 +247,10 @@ struct Cli {
 
 impl Cli {
     fn parse() -> Result<Self> {
-        let mut p = lexopt::Parser::from_env();
+        let mut parser = lexopt::Parser::from_env();
         let mut cli = Cli::default();
 
-        while let Some(arg) = p.next()? {
+        while let Some(arg) = parser.next()? {
             match arg {
                 Short('h') | Long("help") => {
                     println!(
@@ -272,22 +281,22 @@ impl Cli {
                 Short('g') | Long("gen-config") => cli.gen_config = true,
                 Short('G') | Long("gen-config-force") => cli.gen_config_force = true,
                 Short('x') | Long("ext") => {
-                    let v = p.value()?;
+                    let raw = parser.value()?;
                     cli.ext = Some(
-                        v.into_string()
+                        raw.into_string()
                             .map_err(|s| SpoutError::InvalidUtf8("--ext", s))?
                     );
                 }
                 Short('n') | Long("name") => {
-                    let v = p.value()?;
+                    let raw = parser.value()?;
                     cli.name = Some(
-                        v.into_string()
+                        raw.into_string()
                             .map_err(|s| SpoutError::InvalidUtf8("--name", s))?
                     );
                 }
-                Value(v) if cli.profile.is_none() => {
+                Value(raw) if cli.profile.is_none() => {
                     cli.profile = Some(
-                        v.into_string()
+                        raw.into_string()
                             .map_err(|s| SpoutError::InvalidUtf8("profile name", s))?
                     );
                 }
@@ -311,8 +320,8 @@ fn write_config(force: bool) -> Result<()> {
         return Err(SpoutError::ConfigExists(path));
     }
 
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
     }
 
     let mut opts = fs::OpenOptions::new();
@@ -353,11 +362,11 @@ fn load_config() -> Result<Config> {
 
 fn generate_filename(
     cfg: Option<&FilenameConfig>,
-    override_ext: Option<&str>,
-    override_name: Option<&str>,
+    ext_override: Option<&str>,
+    name_override: Option<&str>,
 ) -> Result<String> {
-    if let Some(name) = override_name {
-        let ext = override_ext.unwrap_or("");
+    if let Some(name) = name_override {
+        let ext = ext_override.unwrap_or("");
         return Ok(if ext.is_empty() {
             name.to_string()
         } else {
@@ -365,25 +374,25 @@ fn generate_filename(
         });
     }
 
-    let mut base = cfg.and_then(|c| c.prefix.clone()).unwrap_or_default();
+    let mut stem = cfg.and_then(|c| c.prefix.clone()).unwrap_or_default();
 
     if let Some(n) = cfg.and_then(|c| c.random) {
         let byte_len = (n + 1) / 2;
         let mut buf = vec![0u8; byte_len];
         getrandom::fill(&mut buf).map_err(SpoutError::RngError)?;
-        base.push_str(&hex::encode(&buf)[..n]);
+        stem.push_str(&hex::encode(&buf)[..n]);
     }
 
-    if base.is_empty() {
-        base.push_str("ss");
+    if stem.is_empty() {
+        stem.push_str("ss");
     }
 
-    let ext = override_ext
+    let ext = ext_override
         .map(String::from)
         .or_else(|| cfg.and_then(|c| c.extension.clone()))
         .unwrap_or_else(|| "png".to_string());
 
-    Ok(format!("{}.{}", base, ext.trim_start_matches('.')))
+    Ok(format!("{}.{}", stem, ext.trim_start_matches('.')))
 }
 
 fn validate_filename(name: &str) -> Result<()> {
@@ -424,42 +433,45 @@ fn is_private_ip(ip: IpAddr) -> bool {
                 || (o[0] == 100 && (64..=127).contains(&o[1]))
         }
         IpAddr::V6(v6) => {
-            let s = v6.segments();
-            v6.is_loopback() || (s[0] & 0xfe00) == 0xfc00 || (s[0] & 0xffc0) == 0xfe80
+            let segs = v6.segments();
+            v6.is_loopback()
+                || (segs[0] & 0xfe00) == 0xfc00
+                || (segs[0] & 0xffc0) == 0xfe80
         }
     }
 }
 
-fn resolve_url(url: &str) -> Result<(reqwest::Url, Option<std::net::SocketAddr>)> {
-    let parsed = reqwest::Url::parse(url)?;
+fn resolve_url(raw: &str) -> Result<(reqwest::Url, SocketAddr)> {
+    let url = reqwest::Url::parse(raw)?;
 
-    match parsed.scheme() {
+    match url.scheme() {
         "http" | "https" => {}
         s => return Err(SpoutError::UnsupportedScheme(s.to_string())),
     }
 
-    let host = parsed.host_str().ok_or(SpoutError::NoHost)?;
-    let port = parsed.port_or_known_default().ok_or(SpoutError::NoPort)?;
+    let host = url.host_str().ok_or(SpoutError::NoHost)?;
+    let port = url.port_or_known_default().ok_or(SpoutError::NoPort)?;
 
     if let Ok(ip) = host.parse::<IpAddr>() {
-        let addr = std::net::SocketAddr::new(ip, port);
         if is_private_ip(ip) {
             return Err(SpoutError::PrivateIp);
         }
-        return Ok((parsed, Some(addr)));
+        return Ok((url, SocketAddr::new(ip, port)));
     }
 
-    let (tx, rx) = std::sync::mpsc::channel();
-    let host_string = host.to_string();
-    
+    let host_port = format!("{}:{}", host, port);
+    let (tx, rx) = mpsc::channel();
+
     std::thread::spawn(move || {
-        let _ = tx.send((host_string.as_str(), port).to_socket_addrs());
+        let result = host_port.to_socket_addrs();
+        let _ = tx.send(result);
     });
 
-    let addrs_res = rx.recv_timeout(Duration::from_millis(1500))
-        .map_err(|_| SpoutError::DnsResolution(io::Error::new(io::ErrorKind::TimedOut, "DNS resolution timed out")))?;
-
-    let addrs: Vec<_> = addrs_res.map_err(SpoutError::DnsResolution)?.collect();
+    let addrs: Vec<SocketAddr> = rx
+        .recv_timeout(Duration::from_millis(DNS_TIMEOUT_MS))
+        .map_err(|_| SpoutError::DnsTimeout)?
+        .map_err(SpoutError::DnsResolution)?
+        .collect();
 
     if addrs.is_empty() {
         return Err(SpoutError::NoAddresses);
@@ -471,13 +483,13 @@ fn resolve_url(url: &str) -> Result<(reqwest::Url, Option<std::net::SocketAddr>)
         }
     }
 
-    Ok((parsed, Some(addrs[0])))
+    Ok((url, addrs[0]))
 }
 
-fn parse_url_yolo(url: &str) -> Result<reqwest::Url> {
-    let parsed = reqwest::Url::parse(url)?;
-    match parsed.scheme() {
-        "http" | "https" => Ok(parsed),
+fn parse_url_yolo(raw: &str) -> Result<reqwest::Url> {
+    let url = reqwest::Url::parse(raw)?;
+    match url.scheme() {
+        "http" | "https" => Ok(url),
         s => Err(SpoutError::UnsupportedScheme(s.to_string())),
     }
 }
@@ -487,10 +499,9 @@ fn extract_response_value(body: &str, path: &str) -> Result<String> {
         return Ok(body.trim().to_string());
     }
 
-    let json: serde_json::Value =
-        serde_json::from_str(body)?;
+    let json: serde_json::Value = serde_json::from_str(body)?;
 
-    let value = path
+    let node = path
         .split('.')
         .try_fold(&json, |cur, key| {
             cur.get(key)
@@ -499,15 +510,17 @@ fn extract_response_value(body: &str, path: &str) -> Result<String> {
         })
         .map_err(|k| SpoutError::KeyNotFound(k.to_string()))?;
 
-    value
-        .as_str()
+    node.as_str()
         .map(str::to_string)
         .ok_or_else(|| SpoutError::NotAString(path.to_string()))
 }
 
-fn validate_response_url(url: &str) -> Result<()> {
-    let parsed = reqwest::Url::parse(url).map_err(SpoutError::ResponseInvalidUrl)?;
-    match parsed.scheme() {
+fn validate_response_url(value: &str) -> Result<()> {
+    if value.len() > MAX_URL_LEN {
+        return Err(SpoutError::ResponseTooLarge);
+    }
+    let url = reqwest::Url::parse(value).map_err(SpoutError::ResponseInvalidUrl)?;
+    match url.scheme() {
         "http" | "https" => Ok(()),
         s => Err(SpoutError::ResponseUnexpectedScheme(s.to_string())),
     }
@@ -546,24 +559,34 @@ fn run_clipboard(cmd: &[String], text: &str, yolo: bool) -> Result<()> {
     Ok(())
 }
 
+fn format_size(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
 struct CountingReader<R> {
     inner: R,
-    bytes_read: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    tally: Arc<AtomicUsize>,
 }
 
 impl<R: Read> Read for CountingReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let n = self.inner.read(buf)?;
-        self.bytes_read.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+        self.tally.fetch_add(n, Ordering::Relaxed);
         Ok(n)
     }
 }
 
-fn build_request<R: Read + Send + 'static>(
+fn send_request<R: Read + Send + 'static>(
     client: &reqwest::blocking::Client,
     profile: &Profile,
     url: reqwest::Url,
-    data: R,
+    body: R,
     filename: &str,
 ) -> Result<reqwest::blocking::Response> {
     let mut req = match profile.method.to_ascii_uppercase().as_str() {
@@ -576,38 +599,31 @@ fn build_request<R: Read + Send + 'static>(
         req = req.header(&h.key, &h.value);
     }
 
-    let response = if profile.format == "multipart" {
-        let mime = mime_guess::from_path(filename).first_or_octet_stream();
-        let field_name = profile
-            .file_field
-            .clone()
-            .unwrap_or_else(|| "file".to_string());
+    let response = match profile.format.as_str() {
+        "multipart" => {
+            let mime = mime_guess::from_path(filename).first_or_octet_stream();
+            let part = reqwest::blocking::multipart::Part::reader(body)
+                .file_name(filename.to_string())
+                .mime_str(mime.as_ref())?;
 
-        let part = reqwest::blocking::multipart::Part::reader(data)
-            .file_name(filename.to_string())
-            .mime_str(mime.as_ref())?;
+            let mut form = reqwest::blocking::multipart::Form::new();
+            for f in &profile.fields {
+                form = form.text(f.key.clone(), f.value.clone());
+            }
 
-        let mut form = reqwest::blocking::multipart::Form::new();
-        for f in &profile.fields {
-            form = form.text(f.key.clone(), f.value.clone());
+            req.multipart(form.part(profile.file_field.clone(), part))
+                .send()?
         }
-
-        req.multipart(form.part(field_name, part)).send()?
-    } else {
-        req.body(reqwest::blocking::Body::new(data)).send()?
+        "binary" => {
+            if !profile.fields.is_empty() {
+                return Err(SpoutError::FieldsInBinaryFormat);
+            }
+            req.body(reqwest::blocking::Body::new(body)).send()?
+        }
+        fmt => return Err(SpoutError::UnsupportedMethod(fmt.to_string())),
     };
 
     Ok(response)
-}
-
-fn format_size(bytes: usize) -> String {
-    if bytes >= 1024 * 1024 {
-        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
-    } else if bytes >= 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{} B", bytes)
-    }
 }
 
 fn run() -> Result<()> {
@@ -654,7 +670,7 @@ fn run() -> Result<()> {
         .use_rustls_tls()
         .http1_only()
         .user_agent(concat!("spout/", env!("CARGO_PKG_VERSION")))
-        .timeout(Duration::from_secs(TIMEOUT_HTTP));
+        .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS));
 
     let url = if config.yolo {
         builder = builder
@@ -663,46 +679,33 @@ fn run() -> Result<()> {
         parse_url_yolo(&raw_url)?
     } else {
         let (parsed, addr) = resolve_url(&raw_url)?;
-        if let Some(addr) = addr {
-            builder = builder
-                .resolve(parsed.host_str().unwrap_or(""), addr);
-        }
-        builder = builder.redirect(reqwest::redirect::Policy::none());
+        builder = builder
+            .resolve(parsed.host_str().unwrap_or(""), addr)
+            .redirect(reqwest::redirect::Policy::none());
         parsed
     };
 
     let client = builder.build()?;
-    
-    let bytes_read = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let tally = Arc::new(AtomicUsize::new(0));
     let stdin = io::stdin();
-    
+
     let t0 = std::time::Instant::now();
-    let response = if config.yolo {
-        let cr = CountingReader {
-            inner: stdin,
-            bytes_read: std::sync::Arc::clone(&bytes_read),
-        };
-        build_request(&client, &profile, url, cr, &filename)?
+
+    let mut response = if config.yolo {
+        send_request(&client, &profile, url, CountingReader { inner: stdin, tally: Arc::clone(&tally) }, &filename)?
     } else {
-        let cr = CountingReader {
-            inner: stdin.take(MAX_UPLOAD),
-            bytes_read: std::sync::Arc::clone(&bytes_read),
-        };
-        build_request(&client, &profile, url, cr, &filename)?
+        send_request(&client, &profile, url, CountingReader { inner: stdin.take(MAX_UPLOAD), tally: Arc::clone(&tally) }, &filename)?
     };
 
     let elapsed = t0.elapsed().as_secs_f64();
-    let size = bytes_read.load(std::sync::atomic::Ordering::Relaxed);
-
+    let uploaded = tally.load(Ordering::Relaxed);
     let status = response.status();
-    let mut raw_body = Vec::new();
 
+    let mut raw_body = Vec::new();
     if config.yolo {
-        let mut r = response;
-        r.read_to_end(&mut raw_body).map_err(SpoutError::ResponseReadError)?;
+        response.read_to_end(&mut raw_body).map_err(SpoutError::ResponseReadError)?;
     } else {
-        let mut r = response.take(MAX_RESPONSE);
-        r.read_to_end(&mut raw_body).map_err(SpoutError::ResponseReadError)?;
+        response.take(MAX_RESPONSE).read_to_end(&mut raw_body).map_err(SpoutError::ResponseReadError)?;
     }
 
     let body = String::from_utf8_lossy(&raw_body);
@@ -717,14 +720,14 @@ fn run() -> Result<()> {
         validate_response_url(&result)?;
     }
 
-    println!("{}", result);
     eprintln!(
         "spout: ok [{}] {} {} {:.1}s",
         target,
         filename,
-        format_size(size),
+        format_size(uploaded),
         elapsed
     );
+    println!("{}", result);
 
     if let Some(cmd) = config.clipboard {
         if !cmd.is_empty() {
