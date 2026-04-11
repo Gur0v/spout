@@ -9,12 +9,12 @@ Most screenshot tools want to own your entire workflow — hotkey, capture, uplo
 ```sh
 git clone https://github.com/Gur0v/spout
 cd spout
-sh ./install
+./install.sh
 ```
 
 To uninstall globally, just run:
 ```sh
-sh ./uninstall
+./uninstall.sh
 ```
 
 #### Arch Linux (AUR)
