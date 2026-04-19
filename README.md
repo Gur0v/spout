@@ -31,17 +31,17 @@ paru -S spout-git  # git HEAD
 
 Run `spout -g` to generate the default config at `~/.config/spout/config.kdl`.
 
-`0x0` is the default profile. `zendesk`, `ez`, and `imgur` are included as examples for custom backends.
+`x0` is the default profile. `zendesk`, `ez`, and `imgur` are included as examples for custom backends.
 
 ```kdl
-default "0x0"
+default "x0"
 
 clipboard "wl-copy"
 // clipboard "xclip" "-selection" "clipboard"
 // clipboard "xsel" "--clipboard" "--input"
 
-profile "0x0" {
-    url "https://0x0.st"
+profile "x0" {
+    url "https://x0.at"
     method "POST"
     format "multipart"
     file-field "file"

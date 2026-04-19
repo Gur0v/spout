@@ -5,14 +5,14 @@ use std::io::Write;
 
 use crate::error::{Result, SpoutError};
 
-pub const DEFAULT_CONFIG: &str = r#"default "0x0"
+pub const DEFAULT_CONFIG: &str = r#"default "x0"
 
 clipboard "wl-copy"
 // clipboard "xclip" "-selection" "clipboard"
 // clipboard "xsel" "--clipboard" "--input"
 
-profile "0x0" {
-    url "https://0x0.st"
+profile "x0" {
+    url "https://x0.at"
     method "POST"
     format "multipart"
     file-field "file"
