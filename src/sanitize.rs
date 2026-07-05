@@ -2,8 +2,8 @@ use crate::error::{Result, SpoutError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SanitizeStatus {
-    Cleaned(&'static str),
-    Kept(&'static str),
+    Cleaned,
+    Kept,
     Unknown,
     Disabled,
 }
@@ -47,9 +47,9 @@ fn sanitize_known(
 ) -> Result<Sanitized> {
     let sanitized = sanitizer(&bytes).ok_or(SpoutError::SanitizeFailed(format))?;
     let status = if sanitized == bytes {
-        SanitizeStatus::Kept(format)
+        SanitizeStatus::Kept
     } else {
-        SanitizeStatus::Cleaned(format)
+        SanitizeStatus::Cleaned
     };
 
     Ok(Sanitized {
@@ -85,7 +85,10 @@ fn sanitize_png(bytes: &[u8]) -> Option<Vec<u8>> {
         }
 
         let kind = &bytes[pos + 4..pos + 8];
-        if !matches!(kind, b"eXIf" | b"tEXt" | b"zTXt" | b"iTXt" | b"iCCP" | b"tIME") {
+        if !matches!(
+            kind,
+            b"eXIf" | b"tEXt" | b"zTXt" | b"iTXt" | b"iCCP" | b"tIME"
+        ) {
             out.extend_from_slice(&bytes[pos..end]);
         }
 
@@ -237,7 +240,7 @@ mod tests {
 
         let sanitized = sanitize_media(png, true).unwrap();
 
-        assert_eq!(sanitized.status, SanitizeStatus::Cleaned("png"));
+        assert_eq!(sanitized.status, SanitizeStatus::Cleaned);
         assert!(!contains(&sanitized.bytes, b"tEXt"));
         assert!(!contains(&sanitized.bytes, b"iCCP"));
         assert!(!contains(&sanitized.bytes, b"tIME"));
@@ -251,7 +254,7 @@ mod tests {
 
         let sanitized = sanitize_media(png.clone(), true).unwrap();
 
-        assert_eq!(sanitized.status, SanitizeStatus::Kept("png"));
+        assert_eq!(sanitized.status, SanitizeStatus::Kept);
         assert_eq!(sanitized.bytes, png);
     }
 
@@ -267,7 +270,7 @@ mod tests {
 
         let sanitized = sanitize_media(jpeg, true).unwrap();
 
-        assert_eq!(sanitized.status, SanitizeStatus::Cleaned("jpeg"));
+        assert_eq!(sanitized.status, SanitizeStatus::Cleaned);
         assert!(!contains(&sanitized.bytes, b"Exif\0\0"));
         assert!(!contains(&sanitized.bytes, b"ICC_PROFILE\0"));
         assert!(!contains(&sanitized.bytes, b"comment"));
@@ -286,7 +289,7 @@ mod tests {
 
         let sanitized = sanitize_media(webp, true).unwrap();
 
-        assert_eq!(sanitized.status, SanitizeStatus::Cleaned("webp"));
+        assert_eq!(sanitized.status, SanitizeStatus::Cleaned);
         assert!(!contains(&sanitized.bytes, b"ICCP"));
         assert!(!contains(&sanitized.bytes, b"EXIF"));
         assert!(!contains(&sanitized.bytes, b"XMP "));

@@ -7,6 +7,9 @@ pub enum SpoutError {
     #[error("invalid utf-8 in {0}: {1:?}")]
     InvalidUtf8(&'static str, std::ffi::OsString),
 
+    #[error("{0}")]
+    InvalidArgument(String),
+
     #[error("failed to resolve config dir")]
     NoConfigDir,
 
@@ -29,7 +32,7 @@ pub enum SpoutError {
     DangerousFilename(String),
 
     #[error("invalid url: {0}")]
-    InvalidUrl(#[from] url::ParseError),
+    InvalidUrl(String),
 
     #[error("unsupported scheme: {0}")]
     UnsupportedScheme(String),
@@ -68,7 +71,7 @@ pub enum SpoutError {
     ResponseTooLargeLimit(u64),
 
     #[error("response value is not a valid url: {0}")]
-    ResponseInvalidUrl(#[source] url::ParseError),
+    ResponseInvalidUrl(String),
 
     #[error("unexpected scheme in response url: {0}")]
     ResponseUnexpectedScheme(String),
@@ -114,9 +117,6 @@ pub enum SpoutError {
 
     #[error(transparent)]
     Reqwest(#[from] reqwest::Error),
-
-    #[error(transparent)]
-    Lexopt(#[from] lexopt::Error),
 }
 
 pub type Result<T, E = SpoutError> = std::result::Result<T, E>;

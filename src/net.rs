@@ -46,12 +46,7 @@ fn is_private_ip(ip: IpAddr) -> bool {
 }
 
 pub fn resolve_url(raw: &str) -> Result<(reqwest::Url, SocketAddr)> {
-    let url = reqwest::Url::parse(raw)?;
-
-    match url.scheme() {
-        "http" | "https" => {}
-        s => return Err(SpoutError::UnsupportedScheme(s.to_string())),
-    }
+    let url = parse_http_url(raw)?;
 
     let host = url.host_str().ok_or(SpoutError::NoHost)?;
     let port = url.port_or_known_default().ok_or(SpoutError::NoPort)?;
@@ -90,8 +85,8 @@ pub fn resolve_url(raw: &str) -> Result<(reqwest::Url, SocketAddr)> {
     Ok((url, addrs[0]))
 }
 
-pub fn parse_url_yolo(raw: &str) -> Result<reqwest::Url> {
-    let url = reqwest::Url::parse(raw)?;
+pub fn parse_http_url(raw: &str) -> Result<reqwest::Url> {
+    let url = reqwest::Url::parse(raw).map_err(|e| SpoutError::InvalidUrl(e.to_string()))?;
     match url.scheme() {
         "http" | "https" => Ok(url),
         s => Err(SpoutError::UnsupportedScheme(s.to_string())),
@@ -123,9 +118,54 @@ pub fn validate_response_url(value: &str) -> Result<()> {
     if value.len() > MAX_URL_LEN {
         return Err(SpoutError::ResponseTooLarge);
     }
-    let url = reqwest::Url::parse(value).map_err(SpoutError::ResponseInvalidUrl)?;
+    let url =
+        reqwest::Url::parse(value).map_err(|e| SpoutError::ResponseInvalidUrl(e.to_string()))?;
     match url.scheme() {
         "http" | "https" => Ok(()),
         s => Err(SpoutError::ResponseUnexpectedScheme(s.to_string())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_response_value, resolve_url, uri_encode, validate_response_url};
+
+    #[test]
+    fn encodes_filename_for_url_template() {
+        assert_eq!(uri_encode("a b+c.png"), "a%20b%2Bc.png");
+    }
+
+    #[test]
+    fn rejects_private_upload_targets() {
+        let err = resolve_url("https://127.0.0.1/upload").unwrap_err();
+        assert_eq!(err.to_string(), "url resolves to a private ip address");
+    }
+
+    #[test]
+    fn validates_response_url_scheme_and_size() {
+        validate_response_url("https://example.com/image.png").unwrap();
+
+        let err = validate_response_url("file:///tmp/image.png").unwrap_err();
+        assert_eq!(err.to_string(), "unexpected scheme in response url: file");
+
+        let too_long = format!("https://example.com/{}", "a".repeat(2048));
+        let err = validate_response_url(&too_long).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "response body is too large to be a valid url"
+        );
+    }
+
+    #[test]
+    fn extracts_plain_and_json_response_urls() {
+        assert_eq!(
+            extract_response_value(" https://example.com/a.png\n", ".").unwrap(),
+            "https://example.com/a.png"
+        );
+        assert_eq!(
+            extract_response_value(r#"{"data":{"links":["https://e.test/a"]}}"#, "data.links.0")
+                .unwrap(),
+            "https://e.test/a"
+        );
     }
 }

@@ -1,30 +1,9 @@
 use std::io::{self, Cursor, Read};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::config::{FilenameConfig, Profile};
 use crate::error::{Result, SpoutError};
 
 pub const MAX_UPLOAD: u64 = 100 * 1024 * 1024;
-
-pub struct CountingReader<R> {
-    inner: R,
-    tally: Arc<AtomicUsize>,
-}
-
-impl<R> CountingReader<R> {
-    pub fn new(inner: R, tally: Arc<AtomicUsize>) -> Self {
-        Self { inner, tally }
-    }
-}
-
-impl<R: Read> Read for CountingReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let n = self.inner.read(buf)?;
-        self.tally.fetch_add(n, Ordering::Relaxed);
-        Ok(n)
-    }
-}
 
 pub fn generate_filename(
     cfg: Option<&FilenameConfig>,
@@ -45,7 +24,12 @@ pub fn generate_filename(
         let byte_len = n.div_ceil(2);
         let mut buf = vec![0u8; byte_len];
         getrandom::fill(&mut buf).map_err(SpoutError::RngError)?;
-        stem.push_str(&hex::encode(&buf)[..n]);
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        for b in buf {
+            stem.push(HEX[(b >> 4) as usize] as char);
+            stem.push(HEX[(b & 0xf) as usize] as char);
+        }
+        stem.truncate(stem.len() - (byte_len * 2 - n));
     }
 
     if stem.is_empty() {
@@ -68,23 +52,15 @@ fn strip_extension(name: &str) -> &str {
 }
 
 pub fn validate_filename(name: &str) -> Result<()> {
-    if name.chars().any(|c| matches!(c, '/' | '\\' | '\r' | '\n' | '\0'))
+    if name
+        .chars()
+        .any(|c| matches!(c, '/' | '\\' | '\r' | '\n' | '\0'))
         || name.contains("..")
         || name.to_ascii_lowercase().contains("%2f")
     {
         return Err(SpoutError::DangerousFilename(name.to_string()));
     }
     Ok(())
-}
-
-pub fn format_size(bytes: usize) -> String {
-    if bytes >= 1024 * 1024 {
-        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
-    } else if bytes >= 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{} B", bytes)
-    }
 }
 
 pub fn read_stdin(yolo: bool) -> Result<Cursor<Vec<u8>>> {
@@ -121,10 +97,8 @@ pub fn send_request<R: Read + Send + 'static>(
 
     let response = match profile.format.as_str() {
         "multipart" => {
-            let mime = mime_guess::from_path(filename).first_or_octet_stream();
-            let part = reqwest::blocking::multipart::Part::reader(body)
-                .file_name(filename.to_string())
-                .mime_str(mime.as_ref())?;
+            let part =
+                reqwest::blocking::multipart::Part::reader(body).file_name(filename.to_string());
 
             let mut form = reqwest::blocking::multipart::Form::new();
             for f in &profile.fields {
@@ -144,4 +118,45 @@ pub fn send_request<R: Read + Send + 'static>(
     };
 
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{generate_filename, validate_filename};
+    use crate::config::FilenameConfig;
+
+    #[test]
+    fn rejects_dangerous_filenames() {
+        for name in [
+            "../x.png",
+            "dir/x.png",
+            "dir\\x.png",
+            "x%2fy.png",
+            "x\n.png",
+        ] {
+            let err = validate_filename(name).unwrap_err();
+            assert!(
+                err.to_string()
+                    .starts_with("dangerous characters in filename")
+            );
+        }
+    }
+
+    #[test]
+    fn generates_filename_with_overrides() {
+        assert_eq!(
+            generate_filename(None, Some(".jpg"), Some("shot.png")).unwrap(),
+            "shot.jpg"
+        );
+
+        let cfg = FilenameConfig {
+            prefix: Some("spout_".to_string()),
+            random: Some(8),
+            extension: Some("png".to_string()),
+        };
+        let filename = generate_filename(Some(&cfg), None, None).unwrap();
+        assert!(filename.starts_with("spout_"));
+        assert!(filename.ends_with(".png"));
+        assert_eq!(filename.len(), "spout_".len() + 8 + ".png".len());
+    }
 }

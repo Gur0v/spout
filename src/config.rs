@@ -1,5 +1,5 @@
-use directories::ProjectDirs;
 use knuffel::Decode;
+use std::env;
 use std::fs;
 use std::io::Write;
 
@@ -80,9 +80,9 @@ pub struct Profile {
     #[knuffel(child, unwrap(argument), default = "file".to_string())]
     pub file_field: String,
     #[knuffel(children(name = "header"))]
-    pub headers: Vec<KeyValue>,
+    pub headers: Vec<Pair>,
     #[knuffel(children(name = "field"))]
-    pub fields: Vec<KeyValue>,
+    pub fields: Vec<Pair>,
 }
 
 #[derive(Decode, Debug)]
@@ -96,7 +96,7 @@ pub struct FilenameConfig {
 }
 
 #[derive(Decode, Debug)]
-pub struct KeyValue {
+pub struct Pair {
     #[knuffel(argument)]
     pub key: String,
     #[knuffel(argument)]
@@ -104,8 +104,13 @@ pub struct KeyValue {
 }
 
 pub fn config_path() -> Result<std::path::PathBuf> {
-    let dirs = ProjectDirs::from("", "", "spout").ok_or(SpoutError::NoConfigDir)?;
-    Ok(dirs.config_dir().join("config.kdl"))
+    if let Some(dir) = env::var_os("XDG_CONFIG_HOME") {
+        return Ok(std::path::PathBuf::from(dir).join("spout/config.kdl"));
+    }
+
+    env::var_os("HOME")
+        .map(|home| std::path::PathBuf::from(home).join(".config/spout/config.kdl"))
+        .ok_or(SpoutError::NoConfigDir)
 }
 
 pub fn write_config(force: bool) -> Result<()> {
@@ -151,10 +156,10 @@ pub fn load_config() -> Result<Config> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = fs::metadata(&path) {
-            if meta.permissions().mode() & 0o077 != 0 {
-                return Err(SpoutError::InsecureConfig(path));
-            }
+        if let Ok(meta) = fs::metadata(&path)
+            && meta.permissions().mode() & 0o077 != 0
+        {
+            return Err(SpoutError::InsecureConfig(path));
         }
     }
 

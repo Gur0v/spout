@@ -1,4 +1,5 @@
-use lexopt::prelude::*;
+use std::env;
+use std::ffi::OsString;
 
 use crate::error::{Result, SpoutError};
 
@@ -15,12 +16,12 @@ pub struct Cli {
 
 impl Cli {
     pub fn parse() -> Result<Self> {
-        let mut parser = lexopt::Parser::from_env();
         let mut cli = Cli::default();
+        let mut args = env::args_os().skip(1);
 
-        while let Some(arg) = parser.next()? {
-            match arg {
-                Short('h') | Long("help") => {
+        while let Some(arg) = args.next() {
+            match arg.to_str() {
+                Some("-h" | "--help") => {
                     println!(
                         "usage: <cmd> | spout [profile] [options]\n\
                          \n\
@@ -36,44 +37,47 @@ impl Cli {
                     );
                     std::process::exit(0);
                 }
-                Short('v') | Long("version") => {
-                    println!(
-                        "spout v{} ({} on {}, {})",
-                        env!("CARGO_PKG_VERSION"),
-                        env!("VERGEN_GIT_SHA"),
-                        env!("VERGEN_GIT_BRANCH"),
-                        env!("VERGEN_GIT_COMMIT_DATE")
-                    );
+                Some("-v" | "--version") => {
+                    println!("spout v{}", env!("CARGO_PKG_VERSION"));
                     std::process::exit(0);
                 }
-                Short('p') | Long("parse") => cli.check = true,
-                Short('N') | Long("no-clipboard") => cli.no_clipboard = true,
-                Short('g') | Long("gen-config") => cli.gen_config = true,
-                Short('G') | Long("gen-config-force") => cli.gen_config_force = true,
-                Short('x') | Long("ext") => {
-                    let raw = parser.value()?;
-                    cli.ext = Some(
-                        raw.into_string()
-                            .map_err(|s| SpoutError::InvalidUtf8("--ext", s))?,
-                    );
+                Some("-p" | "--parse") => cli.check = true,
+                Some("-N" | "--no-clipboard") => cli.no_clipboard = true,
+                Some("-g" | "--gen-config") => cli.gen_config = true,
+                Some("-G" | "--gen-config-force") => cli.gen_config_force = true,
+                Some("-x" | "--ext") => cli.ext = Some(value(&mut args, "--ext")?),
+                Some("-n" | "--name") => cli.name = Some(value(&mut args, "--name")?),
+                Some(s) if let Some(v) = s.strip_prefix("--ext=") => cli.ext = Some(v.to_string()),
+                Some(s) if let Some(v) = s.strip_prefix("--name=") => {
+                    cli.name = Some(v.to_string());
                 }
-                Short('n') | Long("name") => {
-                    let raw = parser.value()?;
-                    cli.name = Some(
-                        raw.into_string()
-                            .map_err(|s| SpoutError::InvalidUtf8("--name", s))?,
-                    );
+                Some(s) if s.starts_with('-') => {
+                    return Err(SpoutError::InvalidArgument(format!(
+                        "unexpected argument: {s}"
+                    )));
                 }
-                Value(raw) if cli.profile.is_none() => {
+                _ if cli.profile.is_none() => {
                     cli.profile = Some(
-                        raw.into_string()
+                        arg.into_string()
                             .map_err(|s| SpoutError::InvalidUtf8("profile name", s))?,
                     );
                 }
-                _ => return Err(arg.unexpected().into()),
+                _ => {
+                    return Err(SpoutError::InvalidArgument(format!(
+                        "unexpected argument: {:?}",
+                        arg
+                    )));
+                }
             }
         }
 
         Ok(cli)
     }
+}
+
+fn value(args: &mut impl Iterator<Item = OsString>, name: &'static str) -> Result<String> {
+    args.next()
+        .ok_or_else(|| SpoutError::InvalidArgument(format!("missing value for {name}")))?
+        .into_string()
+        .map_err(|s| SpoutError::InvalidUtf8(name, s))
 }

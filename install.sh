@@ -4,10 +4,6 @@ set -eu
 PREFIX="${PREFIX:-$HOME/.local}"
 BINDIR="$PREFIX/bin"
 
-echo "Pulling latest changes from git..."
-git fetch origin
-git pull --rebase origin HEAD || git pull origin HEAD
-
 echo "Building spout in release mode..."
 cargo build --release
 
